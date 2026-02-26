@@ -5,6 +5,8 @@ import json
 import os
 import re
 import secrets
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -57,7 +59,11 @@ app.add_middleware(
 # AUTH + PAGO
 # =========================
 USERS_PATH = Path("users.json")
-SESSION_TOKENS: Dict[str, str] = {}
+DB_PATH = Path(os.getenv("EXTRACTO_DB_PATH", "extracto.db"))
+SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
+DEBUG_MAIN_FILE_ENABLED = os.getenv("ENABLE_MAIN_FILE_ENDPOINT", "false").lower() == "true"
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+MAX_SINGLE_CREDIT_BYTES = int(2.4 * 1024 * 1024)
 
 
 class Credentials(BaseModel):
@@ -69,17 +75,176 @@ class PayRequest(BaseModel):
     amount: float = Field(gt=0)
 
 
-def _load_users() -> Dict[str, dict]:
+def _db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db() -> None:
+    with _db_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_paid INTEGER NOT NULL DEFAULT 0,
+                last_payment_amount REAL,
+                credits INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(email) REFERENCES users(email) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_email ON sessions(email)")
+
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "credits" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN credits INTEGER NOT NULL DEFAULT 0")
+
+
+def _migrate_users_json_if_needed() -> None:
     if not USERS_PATH.exists():
-        return {}
-    try:
-        return json.loads(USERS_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
+        return
+
+    with _db_connection() as conn:
+        has_users = conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
+        if has_users:
+            return
+
+        try:
+            users = json.loads(USERS_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        for email, data in users.items():
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO users(email, salt, password_hash, is_paid, last_payment_amount, credits, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    email,
+                    data.get("salt", ""),
+                    data.get("password_hash", ""),
+                    1 if data.get("is_paid") else 0,
+                    data.get("last_payment_amount"),
+                    int(data.get("credits", 1 if data.get("is_paid") else 0)),
+                    now,
+                    now,
+                ),
+            )
 
 
-def _save_users(users: Dict[str, dict]) -> None:
-    USERS_PATH.write_text(json.dumps(users, indent=2, ensure_ascii=False), encoding="utf-8")
+def _user_row_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "email": row["email"],
+        "salt": row["salt"],
+        "password_hash": row["password_hash"],
+        "is_paid": bool(row["is_paid"]),
+        "last_payment_amount": row["last_payment_amount"],
+        "credits": int(row["credits"] or 0),
+    }
+
+
+def _get_user_by_email(email: str) -> Optional[dict]:
+    with _db_connection() as conn:
+        row = conn.execute(
+            "SELECT email, salt, password_hash, is_paid, last_payment_amount, credits FROM users WHERE email = ?",
+            (email,),
+        ).fetchone()
+    return _user_row_to_dict(row) if row else None
+
+
+def _create_user(email: str, salt: str, password_hash: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO users(email, salt, password_hash, is_paid, last_payment_amount, credits, created_at, updated_at)
+            VALUES (?, ?, ?, 0, NULL, 0, ?, ?)
+            """,
+            (email, salt, password_hash, now, now),
+        )
+
+
+def _create_session(email: str) -> str:
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=SESSION_TTL_HOURS)
+    with _db_connection() as conn:
+        conn.execute(
+            "INSERT INTO sessions(token, email, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token, email, now.isoformat(), expires_at.isoformat()),
+        )
+    return token
+
+
+def _delete_session(token: str) -> None:
+    with _db_connection() as conn:
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+
+def _get_email_from_session(token: str) -> Optional[str]:
+    with _db_connection() as conn:
+        row = conn.execute("SELECT email, expires_at FROM sessions WHERE token = ?", (token,)).fetchone()
+        if not row:
+            return None
+        if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
+            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            return None
+        return row["email"]
+
+
+def _credits_for_bytes(total_bytes: int) -> int:
+    return 2 if total_bytes > MAX_SINGLE_CREDIT_BYTES else 1
+
+
+def _set_user_payment(email: str, amount: float) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    credits_to_add = max(1, int(round(amount)))
+    with _db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET is_paid = 1,
+                last_payment_amount = ?,
+                credits = credits + ?,
+                updated_at = ?
+            WHERE email = ?
+            """,
+            (amount, credits_to_add, now, email),
+        )
+    return credits_to_add
+
+
+def _charge_user_credits(email: str, credits_needed: int) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with _db_connection() as conn:
+        cur = conn.execute(
+            "UPDATE users SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?",
+            (credits_needed, now, email, credits_needed),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Créditos insuficientes. Necesitás {credits_needed} crédito(s) para esta conversión.",
+            )
+        row = conn.execute("SELECT credits FROM users WHERE email = ?", (email,)).fetchone()
+    return int(row["credits"] if row else 0)
 
 
 def _hash_password(password: str, salt: str) -> str:
@@ -106,65 +271,65 @@ def _extract_bearer_token(authorization: Optional[str]) -> str:
     return token
 
 
+def _require_admin_key(x_admin_key: Optional[str]) -> None:
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=404, detail="No encontrado.")
+    if not x_admin_key or not hmac.compare_digest(x_admin_key, ADMIN_API_KEY):
+        raise HTTPException(status_code=403, detail="No autorizado.")
+
+
 def _get_current_user(authorization: Optional[str]) -> dict:
     token = _extract_bearer_token(authorization)
-    user_email = SESSION_TOKENS.get(token)
+    user_email = _get_email_from_session(token)
     if not user_email:
         raise HTTPException(status_code=401, detail="Sesión expirada o inválida.")
 
-    users = _load_users()
-    user = users.get(user_email)
+    user = _get_user_by_email(user_email)
     if not user:
         raise HTTPException(status_code=401, detail="Usuario no encontrado.")
     return user
 
 
-def _require_paid_user(authorization: Optional[str]) -> dict:
+def _require_paid_user(authorization: Optional[str], credits_needed: int = 1) -> dict:
     user = _get_current_user(authorization)
-    if not user.get("is_paid"):
-        raise HTTPException(status_code=402, detail="Necesitás pagar para convertir archivos.")
+    if user.get("credits", 0) < credits_needed:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Créditos insuficientes. Necesitás {credits_needed} crédito(s) para convertir archivos.",
+        )
     return user
 
 
 @app.post("/auth/register")
 def register_user(payload: Credentials):
-    users = _load_users()
     email = payload.email.lower()
 
-    if email in users:
+    if _get_user_by_email(email):
         raise HTTPException(status_code=409, detail="Ese usuario ya existe.")
 
     password_record = _create_password_record(payload.password)
-    users[email] = {
-        "email": email,
-        "salt": password_record["salt"],
-        "password_hash": password_record["hash"],
-        "is_paid": False,
-        "last_payment_amount": None,
-    }
-    _save_users(users)
+    _create_user(email, password_record["salt"], password_record["hash"])
 
     return {"message": "Usuario creado correctamente."}
 
 
 @app.post("/auth/login")
 def login_user(payload: Credentials):
-    users = _load_users()
     email = payload.email.lower()
-    user = users.get(email)
+    user = _get_user_by_email(email)
     if not user:
         raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos.")
 
     if not _verify_password(payload.password, user["salt"], user["password_hash"]):
         raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos.")
 
-    token = secrets.token_urlsafe(32)
-    SESSION_TOKENS[token] = email
+    token = _create_session(email)
 
     return {
         "token": token,
         "email": email,
         "is_paid": bool(user.get("is_paid")),
+        "credits": int(user.get("credits", 0)),
     }
 
 
@@ -175,36 +340,37 @@ def auth_me(authorization: Optional[str] = Header(default=None)):
         "email": user["email"],
         "is_paid": bool(user.get("is_paid")),
         "last_payment_amount": user.get("last_payment_amount"),
+        "credits": int(user.get("credits", 0)),
     }
 
 
 @app.post("/billing/pay")
 def make_payment(payload: PayRequest, authorization: Optional[str] = Header(default=None)):
-    token = _extract_bearer_token(authorization)
     user = _get_current_user(authorization)
-
-    users = _load_users()
     email = user["email"]
 
-    users[email]["is_paid"] = True
-    users[email]["last_payment_amount"] = payload.amount
-    _save_users(users)
-
-    SESSION_TOKENS[token] = email
+    credits_added = _set_user_payment(email, payload.amount)
+    user_after = _get_user_by_email(email) or {}
 
     return {
         "message": "Pago aprobado. Ya podés convertir extractos.",
         "email": email,
         "is_paid": True,
         "amount": payload.amount,
+        "credits_added": credits_added,
+        "credits": int(user_after.get("credits", 0)),
     }
 
 
 @app.post("/auth/logout")
 def logout_user(authorization: Optional[str] = Header(default=None)):
     token = _extract_bearer_token(authorization)
-    SESSION_TOKENS.pop(token, None)
+    _delete_session(token)
     return {"message": "Sesión cerrada."}
+
+
+_init_db()
+_migrate_users_json_if_needed()
 
 
 # =========================
@@ -1388,12 +1554,15 @@ async def convert(
     file: UploadFile = File(...),
     authorization: Optional[str] = Header(default=None),
 ):
-    _require_paid_user(authorization)
+    user = _require_paid_user(authorization, credits_needed=1)
 
     if file.content_type not in ("application/pdf", "application/octet-stream"):
         raise HTTPException(status_code=400, detail="Subí un PDF válido.")
 
     pdf_bytes = await file.read()
+    credits_needed = _credits_for_bytes(len(pdf_bytes))
+    _require_paid_user(authorization, credits_needed=credits_needed)
+
     client_from_pdf = extract_client_name(pdf_bytes) or "-"
 
     try:
@@ -1404,12 +1573,13 @@ async def convert(
         raise HTTPException(status_code=422, detail=f"No se pudo extraer el extracto. Detalle: {e}")
 
     xlsx = build_excel(df, client=client_from_pdf, bank_label=bank_label, watermark=True)
+    remaining_credits = _charge_user_credits(user["email"], credits_needed)
 
     filename = (file.filename or "extracto.pdf").replace(".pdf", "") + ".xlsx"
     return StreamingResponse(
         xlsx,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "X-Credits-Remaining": str(remaining_credits), "X-Credits-Charged": str(credits_needed)},
     )
 
 
@@ -1419,13 +1589,14 @@ async def convert_merge(
     files: List[UploadFile] = File(...),
     authorization: Optional[str] = Header(default=None),
 ):
-    _require_paid_user(authorization)
+    user = _require_paid_user(authorization, credits_needed=1)
 
     if not files:
         raise HTTPException(status_code=400, detail="No se subieron archivos.")
 
     bank_norm = (bank or "").strip().lower()
     all_dfs: List[pd.DataFrame] = []
+    total_bytes = 0
 
     bank_label = None
     client_name = None
@@ -1435,6 +1606,7 @@ async def convert_merge(
             raise HTTPException(status_code=400, detail=f"Archivo inválido (no PDF): {f.filename}")
 
         pdf_bytes = await f.read()
+        total_bytes += len(pdf_bytes)
 
         if client_name is None:
             client_name = extract_client_name(pdf_bytes)
@@ -1450,20 +1622,28 @@ async def convert_merge(
     if not all_dfs:
         raise HTTPException(status_code=400, detail="No se pudo procesar ningún PDF.")
 
+    credits_needed = _credits_for_bytes(total_bytes)
+    _require_paid_user(authorization, credits_needed=credits_needed)
+
     df_all = merge_extracts_keep_first_saldo(all_dfs)
 
     xlsx = build_excel(df_all, client=(client_name or "-"), bank_label=(bank_label or bank), watermark=True)
+    remaining_credits = _charge_user_credits(user["email"], credits_needed)
 
     filename = f"extractos_{bank_norm}_unificados.xlsx"
     return StreamingResponse(
         xlsx,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "X-Credits-Remaining": str(remaining_credits), "X-Credits-Charged": str(credits_needed)},
     )
 
 
 @app.get("/main-file")
-def get_main_file():
+def get_main_file(x_admin_key: Optional[str] = Header(default=None)):
+    if not DEBUG_MAIN_FILE_ENABLED:
+        raise HTTPException(status_code=404, detail="No encontrado.")
+    _require_admin_key(x_admin_key)
+
     main_path = Path(__file__)
     return StreamingResponse(
         iter([main_path.read_text(encoding="utf-8")]),

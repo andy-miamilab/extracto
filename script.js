@@ -6,7 +6,11 @@ const statusEl = document.getElementById("status");
 const submitBtn = document.getElementById("submitBtn");
 const bankSelect = document.getElementById("bankSelect");
 const fileNameEl = document.getElementById("fileName");
+const fileSizeInfo = document.getElementById("fileSizeInfo");
+const creditsBadgeEl = document.getElementById("creditsBadge");
 const copyMainBtn = document.getElementById("copyMainBtn");
+
+const CREDIT_THRESHOLD_BYTES = Math.floor(2.4 * 1024 * 1024);
 
 const emailInput = document.getElementById("emailInput");
 const passwordInput = document.getElementById("passwordInput");
@@ -32,6 +36,7 @@ let authState = {
   token: localStorage.getItem("extracto_token") || "",
   email: "",
   isPaid: false,
+  credits: 0,
 };
 
 function setStatus(msg, type = "") {
@@ -50,6 +55,12 @@ function setPaymentStatus(msg, type = "") {
   if (!paymentStatusEl) return;
   paymentStatusEl.textContent = msg;
   paymentStatusEl.className = "status " + type;
+}
+
+function setCreditsBadge(credits) {
+  if (!creditsBadgeEl) return;
+  const safeCredits = Number.isFinite(Number(credits)) ? Number(credits) : 0;
+  creditsBadgeEl.textContent = `Créditos: ${safeCredits}`;
 }
 
 function getMode() {
@@ -85,12 +96,20 @@ function renderSelectedFiles() {
   const files = selectedFiles();
   if (!files.length) {
     fileNameEl.textContent = "";
+    if (fileSizeInfo) fileSizeInfo.textContent = "Tamaño total: 0 KB/2.4 MB";
     return;
   }
   if (files.length === 1) {
     fileNameEl.textContent = `Archivo seleccionado: ${files[0].name}`;
   } else {
     fileNameEl.textContent = `${files.length} archivos seleccionados: ` + files.map((f) => f.name).join(" · ");
+  }
+
+  if (fileSizeInfo) {
+    const totalBytes = files.reduce((acc, f) => acc + (f.size || 0), 0);
+    const kb = (totalBytes / 1024).toFixed(1);
+    const charge = totalBytes > CREDIT_THRESHOLD_BYTES ? 2 : 1;
+    fileSizeInfo.textContent = `Tamaño total: ${kb} KB (${charge} crédito${charge > 1 ? "s" : ""})`;
   }
 }
 
@@ -149,6 +168,8 @@ async function refreshSession() {
   if (!authState.token) {
     authState.email = "";
     authState.isPaid = false;
+    authState.credits = 0;
+    setCreditsBadge(0);
     setAuthStatus("No hay sesión activa.", "");
     return;
   }
@@ -158,8 +179,10 @@ async function refreshSession() {
     const data = await readJsonOrThrow(res);
     authState.email = data.email || "";
     authState.isPaid = Boolean(data.is_paid);
-    const paidText = authState.isPaid ? "✅ Cuenta habilitada por pago" : "⚠️ Falta pago para convertir";
-    setAuthStatus(`Sesión activa: ${authState.email}. ${paidText}`, authState.isPaid ? "ok" : "");
+    authState.credits = Number(data.credits || 0);
+    setCreditsBadge(authState.credits);
+    const paidText = authState.credits > 0 ? `✅ Créditos disponibles: ${authState.credits}` : "⚠️ Sin créditos";
+    setAuthStatus(`Sesión activa: ${authState.email}. ${paidText}`, authState.credits > 0 ? "ok" : "");
   } catch {
     saveToken("");
     authState.email = "";
@@ -195,6 +218,7 @@ if (dropzone) {
 
     setSelectedFiles(onlyPdfs);
     setStatus(`Listo ✅ ${onlyPdfs.length} PDF(s) cargado(s).`, "ok");
+    setActiveStep(3);
   });
 }
 
@@ -210,6 +234,7 @@ if (fileInput) {
     }
     renderSelectedFiles();
     setStatus(`Listo ✅ ${files.length} PDF(s) cargado(s).`, "ok");
+    setActiveStep(3);
   });
 }
 
@@ -268,11 +293,14 @@ if (loginBtn) {
       saveToken(data.token);
       authState.email = data.email;
       authState.isPaid = Boolean(data.is_paid);
+      authState.credits = Number(data.credits || 0);
+      setCreditsBadge(authState.credits);
 
-      const payMsg = authState.isPaid
-        ? "Cuenta habilitada para convertir."
-        : "Iniciaste sesión. Falta pago para convertir.";
-      setAuthStatus(`Sesión iniciada como ${authState.email}. ${payMsg}`, authState.isPaid ? "ok" : "");
+      const payMsg = authState.credits > 0
+        ? `Cuenta habilitada. Créditos: ${authState.credits}.`
+        : "Iniciaste sesión. Cargá créditos para convertir.";
+      setAuthStatus(`Sesión iniciada como ${authState.email}. ${payMsg}`, authState.credits > 0 ? "ok" : "");
+      setActiveStep(2);
     } catch (error) {
       setAuthStatus(`Error al iniciar sesión: ${error.message}`, "err");
     } finally {
@@ -298,6 +326,8 @@ if (logoutBtn) {
       saveToken("");
       authState.email = "";
       authState.isPaid = false;
+      authState.credits = 0;
+      setCreditsBadge(0);
       setAuthStatus("Sesión cerrada.", "ok");
       setPaymentStatus("", "");
       logoutBtn.disabled = false;
@@ -327,8 +357,11 @@ if (payBtn) {
       });
       const data = await readJsonOrThrow(res);
       authState.isPaid = true;
-      setPaymentStatus(`${data.message} Monto: USD ${amount.toFixed(2)}.`, "ok");
-      setAuthStatus(`Sesión activa: ${authState.email}. ✅ Cuenta habilitada por pago`, "ok");
+      authState.credits = Number(data.credits || authState.credits || 0);
+      setCreditsBadge(authState.credits);
+      setPaymentStatus(`${data.message} Créditos +${data.credits_added || 0}. Saldo: ${authState.credits}.`, "ok");
+      setActiveStep(2);
+      setAuthStatus(`Sesión activa: ${authState.email}. ✅ Créditos disponibles: ${authState.credits}`, "ok");
     } catch (error) {
       setPaymentStatus(`Error en pago: ${error.message}`, "err");
     } finally {
@@ -349,6 +382,13 @@ async function copyMainFileToClipboard() {
 
   const content = await res.text();
   await navigator.clipboard.writeText(content);
+}
+
+function setActiveStep(stepNumber) {
+  const steps = document.querySelectorAll(".step");
+  steps.forEach((step) => {
+    step.classList.toggle("active", Number(step.dataset.step) === Number(stepNumber));
+  });
 }
 
 async function fetchBlobOrThrow(res) {
@@ -388,8 +428,8 @@ if (form) {
       return;
     }
 
-    if (!authState.isPaid) {
-      setStatus("Tu cuenta todavía no está habilitada. Realizá el pago primero.", "err");
+    if ((authState.credits || 0) <= 0) {
+      setStatus("No tenés créditos. Cargá créditos antes de convertir.", "err");
       return;
     }
 
@@ -419,12 +459,19 @@ if (form) {
 
           const res = await fetch(API_URL_SINGLE, { method: "POST", body: fd, headers: authHeaders() });
           const blob = await fetchBlobOrThrow(res);
+          const remaining = Number(res.headers.get("x-credits-remaining") || NaN);
+          if (Number.isFinite(remaining)) {
+            authState.credits = remaining;
+            setCreditsBadge(remaining);
+          }
 
           const outName = f.name.replace(/\.pdf$/i, "") + ".xlsx";
           downloadBlob(blob, outName);
         }
 
         setStatus("Listo ✅ Descargados todos.", "ok");
+        setActiveStep(3);
+        await refreshSession();
         return;
       }
 
@@ -440,7 +487,14 @@ if (form) {
       const outName = `extractos_${bank}_unificado.xlsx`;
       downloadBlob(blob, outName);
 
-      setStatus("Listo ✅ Excel unificado descargado.", "ok");
+      const charged = Number(res.headers.get("x-credits-charged") || 0);
+      const remaining = Number(res.headers.get("x-credits-remaining") || NaN);
+      if (Number.isFinite(remaining)) {
+        authState.credits = remaining;
+        setCreditsBadge(remaining);
+      }
+      setStatus(`Listo ✅ Excel unificado descargado. Créditos cobrados: ${charged || "?"}.`, "ok");
+      setActiveStep(3);
     } catch (error) {
       setStatus("Error: " + (error?.message || "Failed to fetch"), "err");
     } finally {
@@ -449,6 +503,8 @@ if (form) {
   });
 }
 
+setActiveStep(1);
+setCreditsBadge(0);
 refreshSession();
 
 if (copyMainBtn) {
