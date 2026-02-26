@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+codex/evaluate-project-status-aszzyr
   <title>Extractito | PDF a Excel</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -113,10 +114,52 @@
             </div>
           </div>
           <div id="paymentStatus" class="status"></div>
+
+  <title>Convertir Extractos Bancarios PDF a Excel</title>
+
+  <!-- Fuente (opcional) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Montserrat:wght@600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div class="brand">
+        <img class="logo" src="./Logo mIAmi Lab.png" alt="mIAmi Lab" />
+      </div>
+
+      <div class="heroText">
+  <h1>mIAmi Lab Extractos Bancarios PDF a Excel</h1>
+  <p class="subtitle">
+    Elegí el banco, subí uno o varios PDFs y descargá el Excel listo.
+  </p>
+  <p class="powered">POWERED by MIAMI LAB ©</p>
+</div>
+
+    </header>
+
+    <section class="card">
+      <form id="uploadForm" class="form">
+        <div class="grid">
+          <div class="field">
+            <label class="label" for="bankSelect">Banco</label>
+            <select class="select" id="bankSelect" name="bank">
+              <option value="macro">Banco Macro</option>
+              <option value="santander">Banco Santander</option>
+              <option value="nacion">Banco Nación</option>
+            </select>
+            <p class="hint">Si el PDF no corresponde al banco elegido, puede fallar el análisis.</p>
+          </div>
+main
         </div>
 
         <div class="field">
           <label class="label">Modo de descarga</label>
+codex/evaluate-project-status-aszzyr
           <div class="radioRow">
             <label><input type="radio" name="downloadMode" value="single" checked /> Uno por uno</label>
             <label><input type="radio" name="downloadMode" value="merged" /> Unificados</label>
@@ -136,6 +179,96 @@
         <button type="button" class="smallBtn ghost">❓ Preguntas Frecuentes</button>
       </div>
     </section>
+
+          <div class="radioRow">
+            <label class="radioItem">
+              <input type="radio" name="downloadMode" value="single" checked />
+              Descargar uno por uno (recomendado)
+            </label>
+
+            <label class="radioItem">
+              <input type="radio" name="downloadMode" value="merged" />
+              Descargar unificados (1 solo Excel)
+            </label>
+          </div>
+
+          <p class="hint">
+            “Uno por uno” baja un Excel por PDF. “Unificados” requiere el endpoint <code>/convert-merge</code>.
+          </p>
+        </div>
+
+        <div class="field">
+          <label class="label">PDF de extracto</label>
+
+          <!-- Dropzone -->
+          <label id="dropzone" class="dropzone" for="fileInput">
+            <div class="dzIcon" aria-hidden="true">⬇</div>
+            <div class="dzText">
+              <div class="dzTitle">Arrastrá y soltá tus PDFs acá</div>
+              <div class="dzSub">o hacé click para seleccionar</div>
+              <div class="dzFile" id="fileName"></div>
+            </div>
+
+            <button id="clearFile" class="linkBtn" type="button">Quitar</button>
+          </label>
+
+          <!-- Input real -->
+          <input id="fileInput" class="hiddenInput" type="file" accept="application/pdf" multiple />
+
+          <p class="hint">Tip: si tarda, es normal; los PDFs se están procesando.</p>
+          <div id="status" class="status"></div>
+</div>
+
+<!-- ===== BLOQUE LOGIN Y PAGO ===== -->
+<hr class="sep" />
+
+<div class="field">
+  <label class="label">Cuenta</label>
+
+  <div class="grid2">
+    <div>
+      <label class="labelMini" for="emailInput">Email</label>
+      <input id="emailInput" class="input" type="email" placeholder="tu@email.com" />
+    </div>
+
+    <div>
+      <label class="labelMini" for="passwordInput">Contraseña</label>
+      <input id="passwordInput" class="input" type="password" placeholder="mínimo 6 caracteres" />
+    </div>
+  </div>
+
+  <div class="btnRow">
+    <button id="registerBtn" type="button" class="btnSmall">Crear usuario</button>
+    <button id="loginBtn" type="button" class="btnSmall">Iniciar sesión</button>
+    <button id="logoutBtn" type="button" class="btnSmall ghost">Cerrar sesión</button>
+  </div>
+
+  <div id="authStatus" class="status"></div>
+</div>
+
+<div class="field">
+  <label class="label">Pago (habilitar cuenta)</label>
+
+  <div class="grid2">
+    <div>
+      <label class="labelMini" for="amountInput">Monto (USD)</label>
+      <input id="amountInput" class="input" type="number" step="0.01" min="1" value="10" />
+    </div>
+    <div class="btnAlignBottom">
+      <button id="payBtn" type="button" class="btnSmall">Pagar</button>
+    </div>
+  </div>
+
+  <div id="paymentStatus" class="status"></div>
+</div>
+<!-- ===== FIN BLOQUE LOGIN ===== -->
+
+<button id="submitBtn" class="btn" type="submit">Convertir</button>
+      </form>
+    </section>
+
+    <footer class="footer">PotenciAI. Liberado.</footer>
+main
   </main>
 
   <script src="./config.js"></script>
