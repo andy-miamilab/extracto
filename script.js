@@ -6,6 +6,7 @@ const statusEl = document.getElementById("status");
 const submitBtn = document.getElementById("submitBtn");
 const bankSelect = document.getElementById("bankSelect");
 const fileNameEl = document.getElementById("fileName");
+const fileSizeInfo = document.getElementById("fileSizeInfo");
 const copyMainBtn = document.getElementById("copyMainBtn");
 
 const emailInput = document.getElementById("emailInput");
@@ -85,12 +86,19 @@ function renderSelectedFiles() {
   const files = selectedFiles();
   if (!files.length) {
     fileNameEl.textContent = "";
+    if (fileSizeInfo) fileSizeInfo.textContent = "Tamaño total: 0 KB/2.4 MB";
     return;
   }
   if (files.length === 1) {
     fileNameEl.textContent = `Archivo seleccionado: ${files[0].name}`;
   } else {
     fileNameEl.textContent = `${files.length} archivos seleccionados: ` + files.map((f) => f.name).join(" · ");
+  }
+
+  if (fileSizeInfo) {
+    const totalBytes = files.reduce((acc, f) => acc + (f.size || 0), 0);
+    const kb = (totalBytes / 1024).toFixed(1);
+    fileSizeInfo.textContent = `Tamaño total: ${kb} KB/2.4 MB`;
   }
 }
 
@@ -195,6 +203,7 @@ if (dropzone) {
 
     setSelectedFiles(onlyPdfs);
     setStatus(`Listo ✅ ${onlyPdfs.length} PDF(s) cargado(s).`, "ok");
+    setActiveStep(3);
   });
 }
 
@@ -210,6 +219,7 @@ if (fileInput) {
     }
     renderSelectedFiles();
     setStatus(`Listo ✅ ${files.length} PDF(s) cargado(s).`, "ok");
+    setActiveStep(3);
   });
 }
 
@@ -273,6 +283,7 @@ if (loginBtn) {
         ? "Cuenta habilitada para convertir."
         : "Iniciaste sesión. Falta pago para convertir.";
       setAuthStatus(`Sesión iniciada como ${authState.email}. ${payMsg}`, authState.isPaid ? "ok" : "");
+      setActiveStep(2);
     } catch (error) {
       setAuthStatus(`Error al iniciar sesión: ${error.message}`, "err");
     } finally {
@@ -328,6 +339,7 @@ if (payBtn) {
       const data = await readJsonOrThrow(res);
       authState.isPaid = true;
       setPaymentStatus(`${data.message} Monto: USD ${amount.toFixed(2)}.`, "ok");
+      setActiveStep(3);
       setAuthStatus(`Sesión activa: ${authState.email}. ✅ Cuenta habilitada por pago`, "ok");
     } catch (error) {
       setPaymentStatus(`Error en pago: ${error.message}`, "err");
@@ -349,6 +361,13 @@ async function copyMainFileToClipboard() {
 
   const content = await res.text();
   await navigator.clipboard.writeText(content);
+}
+
+function setActiveStep(stepNumber) {
+  const steps = document.querySelectorAll(".step");
+  steps.forEach((step) => {
+    step.classList.toggle("active", Number(step.dataset.step) === Number(stepNumber));
+  });
 }
 
 async function fetchBlobOrThrow(res) {
@@ -449,6 +468,7 @@ if (form) {
   });
 }
 
+setActiveStep(1);
 refreshSession();
 
 if (copyMainBtn) {
